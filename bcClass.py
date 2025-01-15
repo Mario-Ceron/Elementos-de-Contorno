@@ -326,6 +326,144 @@ class BC_PROBLEM:
 
         return A, B, D
 
+    def solve_13(self, points):
+
+        matrixPos = np.zeros(self.NDOMN + len(self.intNumber))
+        for domID in range(self.NDOMN):
+            bol = np.any(self.intDomain == domID, axis=1)
+            matrixPos[domID] = self.NNODE[domID] - sum(self.intNumber[bol])
+
+        matrixPos[self.NDOMN:] = self.intNumber*2
+        matrixPos = np.hstack([0, np.cumsum(matrixPos)])
+        matrixPos = matrixPos.astype(int)
+        nnodes          = int(sum(self.NNODE))
+        nnodesInterface = int(sum(self.intNumber)*2)
+
+        A = np.empty(0)
+        B = np.zeros((nnodes, nnodes))
+
+        self.uSol = []
+        self.qSol = []
+        
+
+        nnodes          = np.hstack([0, np.cumsum(self.NNODE).astype(int)])
+        nnodesInterface = np.hstack([0, np.cumsum(self.intNumber).astype(int)])
+
+        for domId in range(self.NDOMN):
+
+            row_i = nnodes[domId]
+            row_f = nnodes[domId + 1]
+
+            AA, BB, DD = self.getMatrix_13(domId, self.boundaryCond[domId], points)
+
+            notInterface = np.array([])
+
+            index = np.argwhere(self.intDomain == domId)
+            for i, j in index:
+                notInterface = np.append(notInterface, self.interface[i][j])
+
+                col_i = matrixPos[self.NDOMN + i]
+                col_f = matrixPos[self.NDOMN + i + 1]
+                
+                B[row_i:row_f, col_i:col_f] = np.hstack([BB[:, self.interface[i][j]], 
+                    (2*j - 1)*AA[:, self.interface[i][j]]])
+
+            notInterface = np.setdiff1d(np.arange(self.NNODE[domId]), notInterface)
+
+            col_i = matrixPos[domId]
+            col_f = matrixPos[domId + 1]
+            B[row_i:row_f, col_i:col_f] = BB[:, notInterface]
+            A = np.append(A, AA[:, notInterface]@self.boundaryCond[domId][notInterface, 1] - DD)
+
+        X = np.linalg.solve(B, A)
+
+        for domId in range(self.NDOMN):
+
+            u   = np.zeros(self.NNODE[domId])
+            q   = self.boundaryCond[domId][:, 1]
+
+            notInterface = np.array([])
+
+            index = np.argwhere(self.intDomain == domId)
+            for i, j in index:
+                notInterface = np.append(notInterface, self.interface[i][j])
+
+                col_i = matrixPos[self.NDOMN + i]
+                col_f = matrixPos[self.NDOMN + i + 1]
+
+                u[self.interface[i][j]] =           np.split(X[col_i:col_f], 2)[0]
+                q[self.interface[i][j]] = (1 - 2*j)*np.split(X[col_i:col_f], 2)[1]
+
+            col_i = matrixPos[domId]
+            col_f = matrixPos[domId + 1]
+            notInterface = np.setdiff1d(np.arange(self.NNODE[domId]), notInterface)
+
+            u[notInterface] = X[col_i:col_f]
+
+            for i in range(len(self.boundaryCond[domId])):
+                if self.boundaryCond[domId][i, 0] == 0:
+                    aux1 = q[i]
+                    aux2 = u[i]
+                    u[i] = aux1
+                    q[i] = aux2
+
+            self.uSol.append(u)
+            self.qSol.append(q)
+
+            if np.isnan(self.sclu) or np.abs(u).max() > self.sclu:
+                self.sclu = np.abs(u).max()
+            if np.isnan(self.sclq) or np.abs(q).max() > self.sclq:
+                self.sclq = np.abs(q).max()
+
+    def getMatrix_13(self, domainID, BC, points):
+        NNODE = int(self.NNODE[domainID])
+        NELEM = int(self.NELEM[domainID])
+        node  = self.node[domainID]
+        cone  = self.cone[domainID]
+        k     = self.k[domainID]
+
+        H = np.zeros((NNODE, NNODE))
+        G = np.zeros((NNODE, NNODE))
+        A = np.zeros((NNODE, NNODE))
+        B = np.zeros((NNODE, NNODE))
+        D = np.zeros(NNODE)
+
+        ξ , w      = self.ξ, self.w
+        PHI        = self.crt @ self.phi(ξ)
+        PHI_geom   = self.phi_geom(ξ)
+        PHI_geom_t = self.phi_geom_t(ξ)
+
+
+        for ii, (x0, y0) in enumerate(points):
+            for ej in range(NELEM):
+                
+                cord   = self.cord[cone[ej]]                  
+                jj     = ej * (self.order + 1) + np.arange(self.order + 1)
+
+
+                tx, ty = cord.T@PHI_geom_t
+                J      = np.sqrt(tx**2 + ty**2)
+                nx, ny = (ty, -tx)/J
+                xx, yy = cord.T @ PHI_geom
+                
+                r = np.sqrt((xx - x0) ** 2 + (yy - y0) ** 2)
+                drdn = (xx - x0) * nx + (yy - y0) * ny
+                drdn /= r
+
+                G[ii, jj] +=   -(1 / 2 / np.pi * np.log(r) * J) @ (w * PHI).T
+                H[ii, jj] += -k*(1 / 2 / np.pi / r * drdn  * J) @ (w * PHI).T
+
+        for i in range(len(BC)):
+            if BC[i, 0] == 0:
+                A[:, i] = -H[:, i]
+                B[:, i] = -G[:, i]
+            if BC[i, 0] == 1:
+                A[:, i] = G[:, i]
+                B[:, i] = H[:, i]
+
+        return A, B, np.zeros(len(BC))
+
+
 
     def internalCell(self, domId, lc = 0.5, view = False):
         # Initialize gmsh
@@ -554,6 +692,13 @@ class BC_PROBLEM:
                 ax[0].scatter(*p, color="b", marker="+")
                 ax[1].scatter(*p, color="b", marker="+")
 
+            for domId in range(self.NDOMN):
+                for ei in range(self.NELEM[domId]):      
+                    cord = self.cord[self.cone[domId][ei]]
+                    ax[0].scatter(*self.node[domId][ei].T, color="r", s=5)
+                    ax[1].scatter(*self.node[domId][ei].T, color="r", s=5)
+                
+
 
             if scale == -1:
                 dxmax = -1
@@ -713,7 +858,7 @@ class BC_PROBLEM:
 
                     ax[0].scatter(*x0, s = 5, color = 'g')
                     
-                    ax[1].arrow(*x0, qx, qy, head_width=0.05, head_length=0.1, color = 'g')
+                    ax[1].arrow(*x0, qx, qy, head_width=0.025, head_length=0.05, color = 'g')
 
             if domcell == True:
                 for domId in range(self.NDOMN):
@@ -730,5 +875,5 @@ class BC_PROBLEM:
             ax[1].set_aspect("equal", adjustable='box')
 
         if filename != -1:
-            plt.savefig(filename)
+            plt.savefig(filename, bbox_inches='tight')
         plt.show()
